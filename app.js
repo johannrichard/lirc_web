@@ -4,12 +4,13 @@
 var express = require('express');
 var logger = require('morgan');
 var compress = require('compression');
-var lircNode = require('lirc_node');
+var lircNode = require('lirc-client');
 var consolidate = require('consolidate');
 var swig = require('swig');
 var labels = require('./lib/labels');
 var https = require('https');
 var fs = require('fs');
+// var async = require('async');
 var macros = require('./lib/macros');
 
 // Precompile templates
@@ -35,6 +36,7 @@ var sslOptions = {
 };
 
 var labelFor = {};
+var remotes = {};
 
 // App configuration
 app.engine('.html', consolidate.swig);
@@ -46,8 +48,6 @@ app.use(express.static(__dirname + '/static'));
 
 function _init() {
   var home = process.env.HOME;
-
-  lircNode.init();
 
   // Config file is optional
   try {
@@ -62,11 +62,46 @@ function _init() {
   }
 
   if (config.socket) {
-    lircNode.setSocket(config.socket);
+    // TODO: Check whether this is the way to do it
+    lircNode = lircNode({
+      path: config.socket,
+    });
+  }
+
+  if (config.host) {
+    // TODO: Check whether this is the way to do it
+    lircNode = lircNode({
+      host: config.host,
+    });
   }
 
   // Refresh the app cache manifest hash
   bootupTime = Date.now();
+}
+
+function populateRemotes() {
+  // Populate remotes
+  function _populateRemoteCommands(remote, commands) {
+    commands.forEach(function (element) {
+      var commandName = element.match(/^.*\s(.*)$/);
+      if (commandName && commandName[1]) remotes[remote].push(commandName[1]);
+    });
+  }
+
+  function _populateRemote(remote) {
+    lircNode.cmd('LIST', remote, '', function (err, res) {
+      _populateRemoteCommands(remote, res);
+    });
+  }
+
+  lircNode.cmd('LIST', function (err, res) {
+    res.forEach(function (remote) {
+      if (remote) {
+        remotes[remote] = [];
+        _populateRemote(remote);
+      }
+    });
+  });
 }
 
 function refineRemotes(myRemotes) {
@@ -107,6 +142,13 @@ if (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development') {
   config = require(__dirname + '/test/fixtures/config.json');
 } else {
   _init();
+
+  lircNode.on('connect', function () {
+    lircNode.cmd('VERSION', function (err, res) {
+      console.log('Connected to LIRC Version', res);
+    });
+    populateRemotes();
+  });
 }
 
 // initialize Labels for remotes / commands
@@ -116,7 +158,7 @@ labelFor = labels(config.remoteLabels, config.commandLabels);
 
 // Index
 app.get('/', function (req, res) {
-  var refinedRemotes = refineRemotes(lircNode.remotes);
+  var refinedRemotes = refineRemotes(remotes);
   res.send(JST.index({
     remotes: refinedRemotes,
     macros: config.macros,
@@ -135,19 +177,19 @@ app.get('/app.appcache', function (req, res) {
 
 // Refresh
 app.get('/refresh', function (req, res) {
-  _init();
+  populateRemotes();
   res.redirect('/');
 });
 
 // List all remotes in JSON format
 app.get('/remotes.json', function (req, res) {
-  res.json(refineRemotes(lircNode.remotes));
+  res.json(refineRemotes(remotes));
 });
 
 // List all commands for :remote in JSON format
 app.get('/remotes/:remote.json', function (req, res) {
-  if (lircNode.remotes[req.params.remote]) {
-    res.json(refineRemotes(lircNode.remotes)[req.params.remote]);
+  if (remotes[req.params.remote]) {
+    res.json(refineRemotes(remotes)[req.params.remote]);
   } else {
     res.sendStatus(404);
   }
@@ -170,21 +212,21 @@ app.get('/macros/:macro.json', function (req, res) {
 
 // Send :remote/:command one time
 app.post('/remotes/:remote/:command', function (req, res) {
-  lircNode.irsend.send_once(req.params.remote, req.params.command, function () {});
+  lircNode.cmd('SEND_ONCE', req.params.remote, req.params.command, function () {});
   res.setHeader('Cache-Control', 'no-cache');
   res.sendStatus(200);
 });
 
 // Start sending :remote/:command repeatedly
 app.post('/remotes/:remote/:command/send_start', function (req, res) {
-  lircNode.irsend.send_start(req.params.remote, req.params.command, function () {});
+  lircNode.cmd('SEND_ONCE', req.params.remote, req.params.command, function () {});
   res.setHeader('Cache-Control', 'no-cache');
   res.sendStatus(200);
 });
 
 // Stop sending :remote/:command repeatedly
 app.post('/remotes/:remote/:command/send_stop', function (req, res) {
-  lircNode.irsend.send_stop(req.params.remote, req.params.command, function () {});
+  lircNode.cmd('SEND_STOP', req.params.remote, req.params.command, function () {});
   res.setHeader('Cache-Control', 'no-cache');
   res.sendStatus(200);
 });
